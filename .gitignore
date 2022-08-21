@@ -1,0 +1,6 @@
+# file system
+.DS_Store
+
+# ide
+.idea/**
+.vscode/**
