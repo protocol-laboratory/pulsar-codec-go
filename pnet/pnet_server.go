@@ -36,7 +36,7 @@ type PulsarNetServerImpl interface {
 	ReactError(conn net.Conn, err error)
 	WriteError(conn net.Conn, err error)
 
-	CommandConnect(connect *pb.CommandConnect) (*pb.CommandConnected, error)
+	CommandConnect(conn net.Conn, connect *pb.CommandConnect) (*pb.CommandConnected, error)
 }
 
 func (p *PulsarNetServerConfig) addr() string {
@@ -91,7 +91,7 @@ func (p *PulsarNetServer) handleConn(pulsarConn *pulsarConn) {
 			p.impl.ReadError(pulsarConn.conn, fmt.Errorf("message too long: %d", length))
 			break
 		}
-		dstBytes, err := p.react(pulsarConn.buffer.bytes[:length])
+		dstBytes, err := p.react(pulsarConn, pulsarConn.buffer.bytes[:length])
 		if err != nil {
 			p.impl.ReactError(pulsarConn.conn, err)
 			break
@@ -110,7 +110,7 @@ func (p *PulsarNetServer) handleConn(pulsarConn *pulsarConn) {
 	}
 }
 
-func (p *PulsarNetServer) react(bytes []byte) ([]byte, error) {
+func (p *PulsarNetServer) react(pulsarConn *pulsarConn, bytes []byte) ([]byte, error) {
 	req := &pb.BaseCommand{}
 	err := proto.Unmarshal(bytes[8:], req)
 	if err != nil {
@@ -119,7 +119,7 @@ func (p *PulsarNetServer) react(bytes []byte) ([]byte, error) {
 	var baseCommand *pb.BaseCommand
 	switch req.GetType() {
 	case pb.BaseCommand_CONNECT:
-		commandConnected, err := p.impl.CommandConnect(req.Connect)
+		commandConnected, err := p.impl.CommandConnect(pulsarConn.conn, req.Connect)
 		if err != nil {
 			return nil, err
 		}
