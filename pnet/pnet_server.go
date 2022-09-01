@@ -31,10 +31,10 @@ type PulsarNetServerConfig struct {
 }
 
 type PulsarNetServerImpl interface {
-	AcceptError(addr net.Conn, err error)
-	ReadError(addr net.Conn, err error)
-	ReactError(addr net.Conn, err error)
-	WriteError(addr net.Conn, err error)
+	AcceptError(conn net.Conn, err error)
+	ReadError(conn net.Conn, err error)
+	ReactError(conn net.Conn, err error)
+	WriteError(conn net.Conn, err error)
 
 	CommandConnect(connect *pb.CommandConnect) (*pb.CommandConnected, error)
 }
