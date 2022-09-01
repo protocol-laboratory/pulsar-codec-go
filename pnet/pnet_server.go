@@ -128,7 +128,7 @@ func (p *PulsarNetServer) react(bytes []byte) ([]byte, error) {
 			Connected: commandConnected,
 		}
 	}
-	marshal, err := proto.Marshal(baseCommand)
+	marshal, err := pb.MarshalBaseCmd(baseCommand, true)
 	if err != nil {
 		return nil, err
 	}
