@@ -128,6 +128,9 @@ func NewPulsarGnetClient(config GnetClientConfig) (*PulsarGnetClient, error) {
 	p := &PulsarGnetClient{}
 	var err error
 	p.networkClient, err = gnet.NewClient(p, gnet.WithCodec(pulsarCodec))
+	if err != nil {
+		return nil, err
+	}
 	err = p.networkClient.Start()
 	if err != nil {
 		return nil, err

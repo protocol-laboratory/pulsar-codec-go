@@ -20,6 +20,7 @@ package pnet
 import (
 	"fmt"
 	"github.com/gogo/protobuf/proto"
+	"github.com/protocol-laboratory/pulsar-codec-go/codec"
 	"github.com/protocol-laboratory/pulsar-codec-go/pb"
 	"net"
 )
@@ -31,12 +32,19 @@ type PulsarNetServerConfig struct {
 }
 
 type PulsarNetServerImpl interface {
+	ConnectionClosed(conn net.Conn)
+
 	AcceptError(conn net.Conn, err error)
 	ReadError(conn net.Conn, err error)
 	ReactError(conn net.Conn, err error)
 	WriteError(conn net.Conn, err error)
 
 	CommandConnect(conn net.Conn, connect *pb.CommandConnect) (*pb.CommandConnected, error)
+	Producer(conn net.Conn, producer *pb.CommandProducer) (*pb.CommandProducerSuccess, error)
+	Send(conn net.Conn, send *pb.CommandSend, meta *pb.MessageMetadata, bytes []byte) (*pb.CommandSendReceipt, error)
+	CloseProducer(conn net.Conn, closeProducer *pb.CommandCloseProducer) (*pb.CommandSuccess, error)
+	PartitionedMetadata(conn net.Conn, partitionedMetadata *pb.CommandPartitionedTopicMetadata) (*pb.CommandPartitionedTopicMetadataResponse, error)
+	Lookup(conn net.Conn, lookup *pb.CommandLookupTopic) (*pb.CommandLookupTopicResponse, error)
 }
 
 func (p *PulsarNetServerConfig) addr() string {
@@ -76,14 +84,19 @@ func (p *PulsarNetServer) handleConn(pulsarConn *pulsarConn) {
 	for {
 		readLen, err := pulsarConn.conn.Read(pulsarConn.buffer.bytes[pulsarConn.buffer.cursor:])
 		if err != nil {
-			p.impl.ReadError(pulsarConn.conn, err)
+			if isEof(err) {
+				p.impl.ConnectionClosed(pulsarConn.conn)
+			} else {
+				p.impl.ReadError(pulsarConn.conn, err)
+				p.impl.ConnectionClosed(pulsarConn.conn)
+			}
 			break
 		}
 		pulsarConn.buffer.cursor += readLen
 		if pulsarConn.buffer.cursor < 4 {
 			continue
 		}
-		length := int(pulsarConn.buffer.bytes[3]) | int(pulsarConn.buffer.bytes[2])<<8 | int(pulsarConn.buffer.bytes[1])<<16 | int(pulsarConn.buffer.bytes[0])<<24 + 4
+		length := codec.FourByteLength(pulsarConn.buffer.bytes) + 4
 		if pulsarConn.buffer.cursor < length {
 			continue
 		}
@@ -94,15 +107,18 @@ func (p *PulsarNetServer) handleConn(pulsarConn *pulsarConn) {
 		dstBytes, err := p.react(pulsarConn, pulsarConn.buffer.bytes[:length])
 		if err != nil {
 			p.impl.ReactError(pulsarConn.conn, err)
+			p.impl.ConnectionClosed(pulsarConn.conn)
 			break
 		}
 		write, err := pulsarConn.conn.Write(dstBytes)
 		if err != nil {
 			p.impl.WriteError(pulsarConn.conn, err)
+			p.impl.ConnectionClosed(pulsarConn.conn)
 			break
 		}
 		if write != len(dstBytes) {
 			p.impl.WriteError(pulsarConn.conn, fmt.Errorf("write %d bytes, but expect %d bytes", write, len(dstBytes)))
+			p.impl.ConnectionClosed(pulsarConn.conn)
 			break
 		}
 		pulsarConn.buffer.cursor -= length
@@ -112,7 +128,8 @@ func (p *PulsarNetServer) handleConn(pulsarConn *pulsarConn) {
 
 func (p *PulsarNetServer) react(pulsarConn *pulsarConn, bytes []byte) ([]byte, error) {
 	req := &pb.BaseCommand{}
-	err := proto.Unmarshal(bytes[8:], req)
+	unmarshalLen := codec.FourByteLength(pulsarConn.buffer.bytes[4:])
+	err := proto.Unmarshal(bytes[8:unmarshalLen+8], req)
 	if err != nil {
 		return nil, err
 	}
@@ -127,6 +144,69 @@ func (p *PulsarNetServer) react(pulsarConn *pulsarConn, bytes []byte) ([]byte, e
 			Type:      pb.BaseCommand_CONNECTED.Enum(),
 			Connected: commandConnected,
 		}
+	case pb.BaseCommand_PRODUCER:
+		commandProducerSuccess, err := p.impl.Producer(pulsarConn.conn, req.Producer)
+		if err != nil {
+			return nil, err
+		}
+		baseCommand = &pb.BaseCommand{
+			Type:            pb.BaseCommand_PRODUCER_SUCCESS.Enum(),
+			ProducerSuccess: commandProducerSuccess,
+		}
+	case pb.BaseCommand_SEND:
+		messageMetaIdx := unmarshalLen + 8
+		if bytes[messageMetaIdx+0] == 0x0e {
+			if bytes[messageMetaIdx+1] == 0x01 {
+				// skip crc32
+				messageMetaIdx += 6
+			} else if bytes[messageMetaIdx+1] == 0x02 {
+				return nil, fmt.Errorf("not support 0e02 yet")
+			}
+		}
+		messageMetaLen := codec.FourByteLength(bytes[messageMetaIdx:])
+		messageMeta := &pb.MessageMetadata{}
+		err := proto.Unmarshal(bytes[messageMetaIdx+4:messageMetaIdx+4+messageMetaLen], messageMeta)
+		if err != nil {
+			return nil, err
+		}
+		commandSendReceipt, err := p.impl.Send(pulsarConn.conn, req.Send, messageMeta, bytes[messageMetaIdx+4+messageMetaLen:])
+		if err != nil {
+			return nil, err
+		}
+		baseCommand = &pb.BaseCommand{
+			Type:        pb.BaseCommand_SEND_RECEIPT.Enum(),
+			SendReceipt: commandSendReceipt,
+		}
+	case pb.BaseCommand_CLOSE_PRODUCER:
+		success, err := p.impl.CloseProducer(pulsarConn.conn, req.CloseProducer)
+		if err != nil {
+			return nil, err
+		}
+		baseCommand = &pb.BaseCommand{
+			Type:    pb.BaseCommand_SUCCESS.Enum(),
+			Success: success,
+		}
+	case pb.BaseCommand_PARTITIONED_METADATA:
+		commandPartitionedTopicMetadataResponse, err := p.impl.PartitionedMetadata(pulsarConn.conn, req.PartitionMetadata)
+		if err != nil {
+			return nil, err
+		}
+		baseCommand = &pb.BaseCommand{
+			Type:                      pb.BaseCommand_PARTITIONED_METADATA_RESPONSE.Enum(),
+			PartitionMetadataResponse: commandPartitionedTopicMetadataResponse,
+		}
+	case pb.BaseCommand_LOOKUP:
+		commandLookupTopicResponse, err := p.impl.Lookup(pulsarConn.conn, req.LookupTopic)
+		if err != nil {
+			return nil, err
+		}
+		baseCommand = &pb.BaseCommand{
+			Type:                pb.BaseCommand_LOOKUP_RESPONSE.Enum(),
+			LookupTopicResponse: commandLookupTopicResponse,
+		}
+	}
+	if baseCommand == nil {
+		return nil, fmt.Errorf("unknown command type: %s", req.GetType().String())
 	}
 	marshal, err := pb.MarshalBaseCmd(baseCommand, true)
 	if err != nil {
