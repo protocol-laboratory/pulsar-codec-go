@@ -39,6 +39,7 @@ type PulsarNetServerImpl interface {
 	ReactError(conn net.Conn, err error)
 	WriteError(conn net.Conn, err error)
 
+	BaseCommand(conn net.Conn, baseCommand *pb.BaseCommand) (bool, *pb.BaseCommand, error)
 	CommandConnect(conn net.Conn, connect *pb.CommandConnect) (*pb.CommandConnected, error)
 	Producer(conn net.Conn, producer *pb.CommandProducer) (*pb.CommandProducerSuccess, error)
 	Send(conn net.Conn, send *pb.CommandSend, meta *pb.MessageMetadata, bytes []byte) (*pb.CommandSendReceipt, error)
@@ -134,75 +135,81 @@ func (p *PulsarNetServer) react(pulsarConn *pulsarConn, bytes []byte) ([]byte, e
 		return nil, err
 	}
 	var baseCommand *pb.BaseCommand
-	switch req.GetType() {
-	case pb.BaseCommand_CONNECT:
-		commandConnected, err := p.impl.CommandConnect(pulsarConn.conn, req.Connect)
-		if err != nil {
-			return nil, err
-		}
-		baseCommand = &pb.BaseCommand{
-			Type:      pb.BaseCommand_CONNECTED.Enum(),
-			Connected: commandConnected,
-		}
-	case pb.BaseCommand_PRODUCER:
-		commandProducerSuccess, err := p.impl.Producer(pulsarConn.conn, req.Producer)
-		if err != nil {
-			return nil, err
-		}
-		baseCommand = &pb.BaseCommand{
-			Type:            pb.BaseCommand_PRODUCER_SUCCESS.Enum(),
-			ProducerSuccess: commandProducerSuccess,
-		}
-	case pb.BaseCommand_SEND:
-		messageMetaIdx := unmarshalLen + 8
-		if bytes[messageMetaIdx+0] == 0x0e {
-			if bytes[messageMetaIdx+1] == 0x01 {
-				// skip crc32
-				messageMetaIdx += 6
-			} else if bytes[messageMetaIdx+1] == 0x02 {
-				return nil, fmt.Errorf("not support 0e02 yet")
+	cost, baseCommand, err := p.impl.BaseCommand(pulsarConn.conn, req)
+	if err != nil {
+		return nil, err
+	}
+	if !cost {
+		switch req.GetType() {
+		case pb.BaseCommand_CONNECT:
+			commandConnected, err := p.impl.CommandConnect(pulsarConn.conn, req.Connect)
+			if err != nil {
+				return nil, err
 			}
-		}
-		messageMetaLen := codec.FourByteLength(bytes[messageMetaIdx:])
-		messageMeta := &pb.MessageMetadata{}
-		err := proto.Unmarshal(bytes[messageMetaIdx+4:messageMetaIdx+4+messageMetaLen], messageMeta)
-		if err != nil {
-			return nil, err
-		}
-		commandSendReceipt, err := p.impl.Send(pulsarConn.conn, req.Send, messageMeta, bytes[messageMetaIdx+4+messageMetaLen:])
-		if err != nil {
-			return nil, err
-		}
-		baseCommand = &pb.BaseCommand{
-			Type:        pb.BaseCommand_SEND_RECEIPT.Enum(),
-			SendReceipt: commandSendReceipt,
-		}
-	case pb.BaseCommand_CLOSE_PRODUCER:
-		success, err := p.impl.CloseProducer(pulsarConn.conn, req.CloseProducer)
-		if err != nil {
-			return nil, err
-		}
-		baseCommand = &pb.BaseCommand{
-			Type:    pb.BaseCommand_SUCCESS.Enum(),
-			Success: success,
-		}
-	case pb.BaseCommand_PARTITIONED_METADATA:
-		commandPartitionedTopicMetadataResponse, err := p.impl.PartitionedMetadata(pulsarConn.conn, req.PartitionMetadata)
-		if err != nil {
-			return nil, err
-		}
-		baseCommand = &pb.BaseCommand{
-			Type:                      pb.BaseCommand_PARTITIONED_METADATA_RESPONSE.Enum(),
-			PartitionMetadataResponse: commandPartitionedTopicMetadataResponse,
-		}
-	case pb.BaseCommand_LOOKUP:
-		commandLookupTopicResponse, err := p.impl.Lookup(pulsarConn.conn, req.LookupTopic)
-		if err != nil {
-			return nil, err
-		}
-		baseCommand = &pb.BaseCommand{
-			Type:                pb.BaseCommand_LOOKUP_RESPONSE.Enum(),
-			LookupTopicResponse: commandLookupTopicResponse,
+			baseCommand = &pb.BaseCommand{
+				Type:      pb.BaseCommand_CONNECTED.Enum(),
+				Connected: commandConnected,
+			}
+		case pb.BaseCommand_PRODUCER:
+			commandProducerSuccess, err := p.impl.Producer(pulsarConn.conn, req.Producer)
+			if err != nil {
+				return nil, err
+			}
+			baseCommand = &pb.BaseCommand{
+				Type:            pb.BaseCommand_PRODUCER_SUCCESS.Enum(),
+				ProducerSuccess: commandProducerSuccess,
+			}
+		case pb.BaseCommand_SEND:
+			messageMetaIdx := unmarshalLen + 8
+			if bytes[messageMetaIdx+0] == 0x0e {
+				if bytes[messageMetaIdx+1] == 0x01 {
+					// skip crc32
+					messageMetaIdx += 6
+				} else if bytes[messageMetaIdx+1] == 0x02 {
+					return nil, fmt.Errorf("not support 0e02 yet")
+				}
+			}
+			messageMetaLen := codec.FourByteLength(bytes[messageMetaIdx:])
+			messageMeta := &pb.MessageMetadata{}
+			err := proto.Unmarshal(bytes[messageMetaIdx+4:messageMetaIdx+4+messageMetaLen], messageMeta)
+			if err != nil {
+				return nil, err
+			}
+			commandSendReceipt, err := p.impl.Send(pulsarConn.conn, req.Send, messageMeta, bytes[messageMetaIdx+4+messageMetaLen:])
+			if err != nil {
+				return nil, err
+			}
+			baseCommand = &pb.BaseCommand{
+				Type:        pb.BaseCommand_SEND_RECEIPT.Enum(),
+				SendReceipt: commandSendReceipt,
+			}
+		case pb.BaseCommand_CLOSE_PRODUCER:
+			success, err := p.impl.CloseProducer(pulsarConn.conn, req.CloseProducer)
+			if err != nil {
+				return nil, err
+			}
+			baseCommand = &pb.BaseCommand{
+				Type:    pb.BaseCommand_SUCCESS.Enum(),
+				Success: success,
+			}
+		case pb.BaseCommand_PARTITIONED_METADATA:
+			commandPartitionedTopicMetadataResponse, err := p.impl.PartitionedMetadata(pulsarConn.conn, req.PartitionMetadata)
+			if err != nil {
+				return nil, err
+			}
+			baseCommand = &pb.BaseCommand{
+				Type:                      pb.BaseCommand_PARTITIONED_METADATA_RESPONSE.Enum(),
+				PartitionMetadataResponse: commandPartitionedTopicMetadataResponse,
+			}
+		case pb.BaseCommand_LOOKUP:
+			commandLookupTopicResponse, err := p.impl.Lookup(pulsarConn.conn, req.LookupTopic)
+			if err != nil {
+				return nil, err
+			}
+			baseCommand = &pb.BaseCommand{
+				Type:                pb.BaseCommand_LOOKUP_RESPONSE.Enum(),
+				LookupTopicResponse: commandLookupTopicResponse,
+			}
 		}
 	}
 	if baseCommand == nil {
